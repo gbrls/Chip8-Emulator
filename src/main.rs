@@ -10,12 +10,15 @@ use std::{thread, time};
 /// # Reading instructions
 /// Each instrution is 2 bytes wide. They are stored in `mem[0x200..0x600-1]`.
 /// We read the instructions at the PC (_program counter_), each time one instruction is read,
-/// the program counter *have to be* inscreased by one, unless the instruction states otherwise.
+/// the program counter *have to be* increased by one, unless the instruction states otherwise.
 /// To read the instructions you do `CpuState.mem[CpuState.pc]` and `CpuState.mem[CpuState.pc + 1]`.
 ///
 
 const W: usize = 64;
 const H: usize = 32;
+
+const FONT_BASE: usize = 0;
+const FONT_SIZE: usize = 5 * 16;
 
 struct CpuState {
     // Program Counter, counts the current instruction.
@@ -33,20 +36,41 @@ struct CpuState {
     delay: u8,
     sound: u8,
 
+    //Main memory
     mem: Vec<u8>,
+    screen_buffer: Vec<u32>,
 
-    screenBuffer: Vec<u32>,
+    key_state: [u8; 17],
+}
 
-    //TODO: screen is &stack[0xf00]
-    screen: Vec<u8>,
+fn get_font_sprite() -> Vec<u8> {
+    //TODO: the rest of the hex characters;
+    let mut one: Vec<u8> = vec![0xF0, 0x90, 0x90, 0x90, 0xF0];
+    let mut two: Vec<u8> = vec![0x20, 0x60, 0x20, 0x20, 0x70];
+    let mut three: Vec<u8> = vec![0xF0, 0x10, 0xF0, 0x10, 0xF0];
+    let mut four: Vec<u8> = vec![0x90, 0x90, 0xF0, 0x10, 0x10];
+    let mut five: Vec<u8> = vec![0xF0, 0x80, 0xF0, 0x10, 0xF0];
+
+    one.append(&mut two);
+    one.append(&mut three);
+    one.append(&mut four);
+    one.append(&mut five);
+
+    return one;
 }
 
 impl CpuState {
     fn new(m: &Vec<u8>) -> CpuState {
-        let mut mem = vec![0; 0x200 + m.len()];
+        let mut mem = vec![0; 0x200 + m.len() + 5000];
 
-        for i in 0x200..mem.len() {
+        for i in 0x200..(m.len() + 0x200) {
             mem[i] = m[i - 0x200];
+        }
+
+        let font_arr = get_font_sprite();
+
+        for i in 0..(font_arr.len()) {
+            mem[i] = font_arr[i];
         }
 
         let c = CpuState {
@@ -58,8 +82,8 @@ impl CpuState {
             delay: 0,
             sound: 0,
             mem: mem,
-            screenBuffer: vec![0; W * H],
-            screen: Vec::new(), //TODO: screen is &stack[0xf00]
+            screen_buffer: vec![0; W * H],
+            key_state: [0; 17],
         };
 
         c
@@ -70,6 +94,20 @@ impl CpuState {
         // Debugging porpouses
         panic!(_data);
         self.pc += 2;
+    }
+
+    fn update_key_down(&mut self, keycode: u8) {
+        if keycode > 0xF {
+            return;
+        }
+
+        self.key_state[keycode as usize] = 1;
+    }
+
+    fn clear_keys(&mut self) {
+        for i in self.key_state.iter_mut() {
+            *i = 0;
+        }
     }
 
     fn emulate_chip8(&mut self) {
@@ -87,8 +125,7 @@ impl CpuState {
                 //
                 0xE0 => {
                     //CLS
-                    //TODO: screen is &stack[0xf00]
-                    for i in self.screen.iter_mut() {
+                    for i in self.screen_buffer.iter_mut() {
                         *i = 0;
                     }
 
@@ -107,7 +144,15 @@ impl CpuState {
                     self.pc = target as usize;
                 }
 
-                x => println!("UNKNOWN {:#X}", x),
+                x => {
+                    println!(
+                        "UNKNOWN {:X?}, {:X?}",
+                        self.mem[self.pc],
+                        self.mem[self.pc + 1]
+                    );
+
+                    self.pc += 2
+                }
             },
             0x01 => {
                 //1nnn - JUMP addr
@@ -122,12 +167,10 @@ impl CpuState {
 
                 self.sp -= 2;
                 self.mem[self.sp] = (((self.pc + 2) & 0xff00) >> 8) as u8;
-                self.mem[self.sp + 1] = ((self.pc + 2) & 0xff00) as u8;
+                self.mem[self.sp + 1] = ((self.pc + 2) & 0x00ff) as u8;
 
                 self.pc = ((((self.mem[self.pc] as u16) & 0x0f) << 8)
-                    | self.mem[self.pc + 1] as u16) as usize;
-
-                self.pc += 2;
+                    | (self.mem[self.pc + 1] as u16)) as usize;
             }
             0x03 => {
                 // 3xkk - SE Vx, byte
@@ -155,7 +198,7 @@ impl CpuState {
                 // 5xy0 - SE Vx, Vy
                 // Skip next instruction if Vx = Vy.
                 let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                 if self.V[regx] == self.V[regy] {
                     self.pc += 2;
@@ -192,7 +235,7 @@ impl CpuState {
                         // 8xy0 - LD Vx, Vy
                         // Set Vx = Vy.
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         self.V[regx] = self.V[regy];
 
@@ -204,7 +247,7 @@ impl CpuState {
                         //Set Vx = Vx OR Vy.
 
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         self.V[regx] |= self.V[regy];
 
@@ -214,7 +257,7 @@ impl CpuState {
                     0x2 => {
                         // Bitwise AND;
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         self.V[regx] &= self.V[regy];
 
@@ -224,7 +267,7 @@ impl CpuState {
                     0x3 => {
                         // Bitwise XOR;
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         self.V[regx] ^= self.V[regy];
 
@@ -236,7 +279,7 @@ impl CpuState {
                         //Set Vx = Vx + Vy, set VF = carry
 
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         let res: u16 = self.V[regx] as u16 + self.V[regy] as u16;
 
@@ -255,7 +298,7 @@ impl CpuState {
                         //Set Vx = Vx - Vy, set VF = NOT borrow.
 
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         let bg: bool = self.V[regx] > self.V[regy];
 
@@ -287,7 +330,7 @@ impl CpuState {
                         //Set Vx = Vy - Vx, set VF = NOT borrow.
 
                         let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                        let regy: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                        let regy: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                         self.V[0xF] = match self.V[regy] > self.V[regx] {
                             true => 1,
@@ -309,13 +352,21 @@ impl CpuState {
                         self.pc += 2;
                     }
 
-                    x => println!("UNKNOWN {:#X}", x),
+                    x => {
+                        println!(
+                            "UNKNOWN {:X?}, {:X?}",
+                            self.mem[self.pc],
+                            self.mem[self.pc + 1]
+                        );
+
+                        self.pc += 2
+                    }
                 }
             }
 
             0x9 => {
                 let rx: usize = (self.mem[self.pc] & 0x0f) as usize;
-                let ry: usize = (self.mem[self.pc + 1] & 0xf0) as usize;
+                let ry: usize = ((self.mem[self.pc + 1] & 0xf0) >> 4) as usize;
 
                 if self.V[rx] != self.V[ry] {
                     self.pc += 2;
@@ -347,7 +398,6 @@ impl CpuState {
 
                 let x = (self.mem[self.pc] & 0x0f) as usize;
 
-                //TODO:
                 // Right implementation
                 self.V[x] = r & self.mem[self.pc + 1];
 
@@ -365,15 +415,19 @@ impl CpuState {
                 let x: usize = self.V[regx] as usize;
                 let y: usize = self.V[regy] as usize;
 
-                //println!("Drawing at {} {}, (V{} V{})", x, y, regx, regy);
-
                 for i in 0..n {
-                    for j in 0..8 {
+                    for j in (-8)..(0) {
                         if self.mem[i + (self.I as usize)] & (1 << j) != 0 {
                             let ii: usize = (i as usize + y) % H;
-                            let jj: usize = (j as usize + x) % W;
+                            //TODO: attention in here.
+                            let jj: usize = ((x - 1) - j as usize) % W;
 
-                            self.screenBuffer[(ii * W) + jj] ^= 0xffffff;
+                            //TODO: implement XOR with V[0xF] register
+                            //if self.screen_buffer[(ii * W) + jj] == 0xffffff {
+                            //self.V[0xF] = 1;
+                            //}
+
+                            self.screen_buffer[(ii * W) + jj] ^= 0xffffff;
                         }
                     }
                 }
@@ -381,25 +435,134 @@ impl CpuState {
                 self.pc += 2;
             }
 
-            0xE => {
-                match self.mem[self.pc + 1] {
-                    //0x9E => {
-                    //TODO: implement key
-                    //}
+            0xE => match self.mem[self.pc + 1] {
+                0x9E => {
+                    let reg: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    if (self.key_state[self.V[reg] as usize] == 1) {
+                        self.pc += 2;
+                    }
 
-                    //0xA1 => {
-                    //TODO: implement keyboard
-                    //}
-                    x => println!("UNKNOWN {:X?}", x),
+                    self.pc += 2;
                 }
-            }
 
-            0xF => {
-                match self.mem[self.pc + 1] {
-                    //TODO: all F instructions
-                    x => println!("UNKNOWN {:X?}", x),
+                0xA1 => {
+                    let reg: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    if (self.key_state[self.V[reg] as usize] == 0) {
+                        self.pc += 2;
+                    }
+
+                    self.pc += 2;
                 }
-            }
+                x => {
+                    println!(
+                        "UNKNOWN {:X?}, {:X?}",
+                        self.mem[self.pc],
+                        self.mem[self.pc + 1]
+                    );
+                    self.pc += 2
+                }
+            },
+
+            0xF => match self.mem[self.pc + 1] {
+                0x7 => {
+                    let x: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    self.V[x] = self.delay;
+
+                    self.pc += 2;
+                }
+
+                0x15 => {
+                    self.delay = (self.mem[self.pc] & 0x0f);
+
+                    self.pc += 2;
+                }
+
+                0x18 => {
+                    self.sound = (self.mem[self.pc] & 0x0f);
+
+                    self.pc += 2;
+                }
+
+                0x29 => {
+                    let reg: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    self.I = FONT_BASE as u16 + (self.V[reg] * 5) as u16;
+
+                    self.pc += 2;
+                }
+
+                0x33 => {
+                    let reg: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    let mut val: u8 = self.V[reg];
+
+                    let ones: u8 = val % 10;
+                    val /= 10;
+                    let tens: u8 = val % 10;
+                    val /= 10;
+                    let hundreds: u8 = val % 10;
+
+                    self.mem[self.I as usize] = hundreds;
+                    self.mem[self.I as usize + 1] = tens;
+                    self.mem[self.I as usize + 2] = ones;
+
+                    self.pc += 2;
+                }
+
+                0x55 => {
+                    let x: usize = (self.mem[self.pc] & 0x0f) as usize;
+
+                    for i in 0..=x {
+                        self.mem[(self.I as usize) + i] = self.V[i];
+                    }
+
+                    self.I += (x + 1) as u16;
+
+                    self.pc += 2;
+                }
+
+                0x65 => {
+                    //Fx65 - LD Vx, [I]
+                    //Read registers V0 through Vx from memory starting at location I.
+
+                    let x: usize = (self.mem[self.pc] & 0x0f) as usize;
+
+                    for i in 0..=x {
+                        self.V[i] = self.mem[(self.I as usize) + i]
+                    }
+
+                    self.I += (x + 1) as u16;
+
+                    self.pc += 2;
+                }
+
+                0x0A => {
+                    let regx: usize = (self.mem[self.pc] & 0x0f) as usize;
+
+                    for (index, i) in self.key_state.iter().enumerate() {
+                        if *i != 0 {
+                            self.pc += 2;
+                            self.V[regx] = index as u8;
+                            break;
+                        }
+                    }
+                }
+
+                0x1E => {
+                    let x: usize = (self.mem[self.pc] & 0x0f) as usize;
+                    self.I += self.V[x] as u16;
+
+                    self.pc += 2;
+                }
+
+                x => {
+                    println!(
+                        "UNKNOWN {:X?}, {:X?}",
+                        self.mem[self.pc],
+                        self.mem[self.pc + 1]
+                    );
+
+                    self.pc += 2
+                }
+            },
 
             x => self.not_impl(x),
         }
@@ -594,7 +757,7 @@ fn main() -> io::Result<()> {
     //panic!("Please provide the ROM's file path");
     //}
     //
-    let mut f = File::open("./roms/maze_demo_2.ch8")?;
+    let mut f = File::open("./roms/game_sub.ch8")?;
 
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
@@ -618,18 +781,44 @@ fn main() -> io::Result<()> {
     while window.is_open() {
         //thread::sleep(time::Duration::from_millis(1));
 
-        if window.is_key_pressed(Key::A, minifb::KeyRepeat::No) {
-            //println!("Key is down");
+        cpu.clear_keys();
+
+        if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
             cpu.emulate_chip8();
+            cpu._disassemble_chip8();
         }
 
         if window.is_key_down(Key::Escape) {
             break;
         }
 
+        window.get_keys().map(|keys| {
+            for t in keys {
+                match t {
+                    Key::Key0 => cpu.update_key_down(0),
+                    Key::Key1 => cpu.update_key_down(1),
+                    Key::Key2 => cpu.update_key_down(2),
+                    Key::Key3 => cpu.update_key_down(3),
+                    Key::Key4 => cpu.update_key_down(4),
+                    Key::Key5 => cpu.update_key_down(5),
+                    Key::Key6 => cpu.update_key_down(6),
+                    Key::Key7 => cpu.update_key_down(7),
+                    Key::Key8 => cpu.update_key_down(8),
+                    Key::Key9 => cpu.update_key_down(9),
+                    Key::A => cpu.update_key_down(0xA),
+                    Key::B => cpu.update_key_down(0xB),
+                    Key::C => cpu.update_key_down(0xC),
+                    Key::D => cpu.update_key_down(0xD),
+                    Key::E => cpu.update_key_down(0xE),
+                    Key::F => cpu.update_key_down(0xF),
+                    _ => (),
+                }
+            }
+        });
+
         cpu.emulate_chip8();
 
-        window.update_with_buffer(&cpu.screenBuffer).unwrap();
+        window.update_with_buffer(&cpu.screen_buffer).unwrap();
     }
 
     Ok(())
